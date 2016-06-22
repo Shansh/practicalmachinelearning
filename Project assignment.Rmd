@@ -1,0 +1,227 @@
+---
+title: "Prediction of Weight Lifting Exercises"
+author: "Dejan Pljevljakusic"
+date: "Tuesday, June 21, 2016"
+output: html_document
+---
+
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement—a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).
+
+In this work we will try to find the most important predictors for Weight Lifting Exercise quality and to build up a prediction model with high accuracy of prediction.
+
+## Data sources
+
+The training data for this project are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here: <https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+## Required libraries
+```{r libraries, echo=TRUE, message=FALSE, warning=FALSE, cache=FALSE}
+library(caret)
+library(randomForest)
+library(dplyr)
+```
+
+## Loading data
+The project task was to build prediction models, to check their accuracy and finally to make prediction on required training set with 20 observations. To avoid any confusion, we have loaded training data set into `training` variable, and final test data set into `testingDF` variable.
+```{r loading data, cache=TRUE}
+training <- read.csv("./data/pml-training.csv", na.strings = c("#DIV/0!", "", "NA"))
+testingDF <- read.csv("./data/pml-testing.csv", na.strings = c("#DIV/0!", "", "NA"))
+```
+
+## Cleaning data
+
+### Drop already created features
+In the manuscript provided by project instructions (Velloso *et al*, 2013) <http://groupware.les.inf.puc-rio.br/public/papers/2013.Velloso.QAR-WLE.pdf> authors have created features based on descriptive statistics and distribution properties. For the purpose of our analysis we will disregard these features and try to build prediction models based on our own features.
+
+```{r dropping features}
+drop_ft <- names(training[, grepl("kurtosis_|skewness_|max_|min_|stddev_|amplitude|avg_|var_" , names(training))])
+training <- training[ , !(names(training) %in% drop_ft)]
+```
+
+### Drop timestamps
+Since exercise measurements were done in successive way, order in the training data set is time-related. Therefore, all time-stamps variables are closely related to the outcome (`classe`). We don't want our prediction model to be based on already known relationship, so we will drop all `timestamps` variables.
+
+```{r dropping timestamps}
+drop_tstm <- names(training[, grepl("_timestamp" , names(training))])
+training <- training[ , !(names(training) %in% drop_tstm)]
+```
+
+### Drop variables with variance close to zero
+Variables with variance close to zero value are very weak predictors and practically useless. So, we would like to drop them out as well.
+
+```{r dropping NZV}
+train_nzv <- nearZeroVar(training, saveMetrics = TRUE)
+train_nzv <- train_nzv[which(train_nzv$nzv == TRUE),]
+nzv_names <- rownames(train_nzv)
+training <- training[, !(names(training) %in% nzv_names)]
+```
+
+### Drop index variable
+Index variable is not predictor variable. It is just an observation number. We should remove it from the training data set.
+
+```{r dropping index var}
+training$X <- NULL
+```
+
+### Drop highly correlated variables
+If some of the variables are highly correlated, we can drop one of them out of the training set. The function `findCorrelation` does this smoothly. This function recognize correlated variables and recommends which variable should be kept for building prediction model. For this purpose, we have made correlation coefficient of **0.75** as a threshold value for *Highly Correlated* variables.
+
+```{r dropping correlated}
+correlationMatrix <- cor(training[, -c(1,55)])
+excl <- training[, c(1,55)]
+highlyCorrelated <- findCorrelation(correlationMatrix, verbose = FALSE, names = TRUE, cutoff=0.75)
+training <- training[ , (names(training) %in% highlyCorrelated)]
+training <- cbind(excl, training)
+```
+
+### Check if there are any remining NA values
+Some of prediction algorithms don't handle missing values in predictors. The **Random Forest** is one of them.
+
+```{r NA check}
+sum(is.na(training))
+```
+
+
+Number of variables in the training data set after variable reduction is 23 (22 predictors and 1 outcome).
+
+```{r}
+dim(training)
+```
+
+### Create training and testing data partitions
+Now we will split our training data set into two parts (60:40) regarding the outcome variable `classe`. This step is necessary for measuring the accuracy of prediction model.
+
+```{r create data partitions}
+inTrain <- createDataPartition(training$classe, p = 0.60, list = F)
+training <- training[inTrain,]
+testing <- training[-inTrain,]
+```
+
+
+## Building prediction models
+
+### Build first prediction model
+For the purpose of building first prediction model we have choose **Random Forest** algorithm. We have used `randomForest` because the `train` function from the `caret` package took too long to perform "rf" prediction model. You may ask why we didn't use convenience of `doParallel` package as it was suggested by Len Greski in <https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md> and answer is - we have a single core processor.
+
+```{r first model, cache=TRUE}
+set.seed(12345)
+modFit1 <- randomForest(classe ~ ., data = training)
+```
+
+### Checking the accuracy of the model
+We have checked the accuracy of our first prediction model by making **Confusion Matrix**. Hereby, we present only observation/prediction table and accuracy of the model.
+
+```{r accuracy1, cache=TRUE}
+pred1 <- predict(modFit1, testing, type = "class")
+cmrf1 <- confusionMatrix(pred1, testing$classe)
+cmrf1$table
+cmrf1$overall['Accuracy']
+```
+Since accuracy of the model has value **1**, it means that prediction ability of the observed model is 100% and Out-of-Sample error is **0**. `Error = 1 - Accuracy = 1 - 1 = 0`.
+
+
+### Cross-Validation for feature selection
+The basic form of cross-validation is k-fold cross-validation. Other forms of cross-validation are special cases of k-fold cross-validation or involve repeated rounds of k-fold cross-validation. For the purpose of this report we have choose 3-fold cross-validation. The function `rfcv` shows the cross-validated prediction performance of models with sequentially reduced number of predictors (ranked by variable importance) via a nested cross-validation procedure. In the presented plot we can see what would be minimal number of the most important variables to achieve dissent accuracy level of the prediction model. In out case, we have choose a threshold of 10% of cross-validation error of each of the models. It becomes clear that as the number of predictors are reduced the error generally increases, but the difference between using 22 predictors and using 5 predictors is low which suggests the 5 predictor model is about as good as the 22 predictor model.
+
+```{r cross validation, cache=TRUE, warning=FALSE}
+result <- rfcv(training[, -2], training[,2], cv.fold=3)
+with(result, plot(n.var, error.cv, log="x", type="o", lwd=2))
+abline(h = 0.1, type = "o", lty = 2, col = "red")
+```
+
+Unfortunately, `rfcv` never actually tells you what the individual variable importance are, at any point. So, you have to go further and explore variable importance separately.
+
+### Checking variable importance
+We have checked the level of contribution of each variable involved in the first prediction model by `importance` function and presented plot show variable importance in decreasing manner. For further prediction model building we will choose only 5 most important predictors (cut-off is presented in the plot with red dashed line)
+
+```{r importance check, warning=FALSE, cache=TRUE}
+imp.var <- data.frame(importance(modFit1))
+imp.var <- imp.var %>% add_rownames() %>% arrange(desc(MeanDecreaseGini))
+par(mar = c(4,10,2,2))
+barplot(rev(imp.var$MeanDecreaseGini), cex.names=.7, cex = .8, names.arg = rev(imp.var$rowname), horiz = TRUE, las = 1, col = "green", main = "Variable importance", xlab = "Mean Decrease Gini")
+abline(h = 20.5, type = "o", lty = 2, col = "red")
+```
+
+### Variable reduction
+Now we will reduce training set to only 5 predictors, and 1 outcome, as it was suggested from cross-validation.
+
+```{r variable reduction}
+imp.names <- imp.var[1:5, 1]
+imp.names <- as.vector(imp.names$rowname)
+imp.training <- training[ , (names(training) %in% imp.names)]
+imp.training <- cbind(imp.training, classe = training[,2])
+imp.testing <- testing[ , (names(testing) %in% imp.names)]
+imp.testing <- cbind(imp.testing, classe = testing[,2])
+dim(imp.training)
+```
+
+### Building new prediction model
+New prediction model will be based only on 5 predictor variables: `roll_belt`, `pitch_belt`, `magnet_dumbbell_y`, `magnet_dumbell_x` and `accel_dumbbell_y`. Outcome variable is `classe`.
+
+```{r new model, cache=TRUE}
+modFit2 <- randomForest(classe ~ ., data = imp.training)
+```
+
+### Precidtion with new model
+Now we can check what would be the prediction accuracy of new prediction model through confusion matrix.
+
+```{r predict new model, cache=TRUE}
+pred2 <- predict(modFit2, imp.testing, type = "class")
+cmrf2 <- confusionMatrix(pred2, imp.testing$classe)
+cmrf2$table
+cmrf2$overall['Accuracy']
+```
+
+As we can see the prediction accuracy of the new model is **0.9992**, so we can use this model to predict outcome of the true testing set `testingDF`. Out-of-Sample error is about **0.0008**.
+
+But first we have to format testing set to preserve only the predictor variables that have been used for prediction model building. 
+
+```{r formating testingDF}
+problem_id <- testingDF$problem_id
+testingDF <- testingDF[, names(testingDF) %in% names(imp.training)]
+```
+
+Furthermore, each variable in the testing set should have the same class as variables in the training set.
+
+### Trick to egalize classes of training and test set
+```{r egalization trick}
+testingDF <- rbind(imp.training[1, -6] , testingDF)
+testingDF <- testingDF[-1,]
+rownames(testingDF) <- 1:20
+```
+
+### Prediction of new model on testing data
+```{r testingDF prediction, cache=TRUE}
+pred_test <- predict(modFit2, testingDF, type = "class")
+pred_test
+```
+
+These are the final results of our prediction. For each observation model has made a single `classe` prediction.
+
+## Conclusion
+In this assignment we have tried to find prediction model based on optimal number of predictor variables. After manual data reduction: dropping already created features, dropping time stamps, dropping NZV's and dropping highly correlated variables, we ended up with training data set of 22 variables. Prediction model based on Random Forest algorithm with all variables included and concluded that the prediction accuracy of the model is equal to 1. After the cross-validation process, 5 most important predictors were chosen for building of new prediction model. This time we ended up with prediction accuracy of about 0.9992. We have concluded that this new model is good enough to be used for final prediction of outcomes for the requested testing set. From 159 predictors in the original training data set, by variable reduction, we ended up with only 5 predictors, which have been involved in prediction of outcomes for 20 observations in the requested testing data set. 
+
+
+### Write results in separate files
+
+Function to generate files with predictions to submit for assignment
+```{r write files}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(pred_test)
+```
+
+## References
+
+Velloso, E., Bulling, A., Gellersen, H., Ugulino, W., Fuks, H. (2013) Qualitative Activity Recognition of Weight Lifting Exercises. In: Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13). Stuttgart, Germany: ACM SIGCHI.
+
